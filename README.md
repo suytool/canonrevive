@@ -45,7 +45,7 @@ Canon助手 的"相机屏显还原"预设针对性地模拟了这种观感：**�
 
 - `canonrevive.fpk` —— x86_64（Intel / AMD 飞牛）
 - `canonrevive.arm64.fpk` —— ARM64（飞牛 ARM 版）
-- `Canon助手-fpk安装包-v0.1.7.zip` —— 双架构合集
+- `CanonHelper-fpk-v0.1.7.zip` —— 双架构合集
 
 然后到飞牛应用中心 → **手动安装** → 上传 fpk 文件（离线安装）：
 
