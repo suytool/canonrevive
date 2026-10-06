@@ -1,0 +1,40 @@
+#!/bin/bash
+
+### This script is called after the user upgrades the application.
+
+# 升级覆盖二进制后，确保旧版本进程（可能已是 (deleted) 残留）被彻底回收，
+# 避免旧实例继续占用 service_port 导致新版本启动时报“端口被占用”。
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "${DIR}/main" ]; then
+    TRIM_APPDEST="${TRIM_APPDEST}" TRIM_PKGVAR="${TRIM_PKGVAR}" TRIM_SERVICE_PORT="${TRIM_SERVICE_PORT}" \
+    TRIM_APPNAME="${TRIM_APPNAME}" TRIM_RUN_USERNAME="${TRIM_RUN_USERNAME}" TRIM_GROUPNAME="${TRIM_GROUPNAME}" \
+        "${DIR}/main" stop >/dev/null 2>&1 || true
+fi
+
+SHARE_DIR="/var/apps/${TRIM_APPNAME}/shares/canonrevive"
+if [ -z "${TRIM_APPNAME}" ]; then
+    SHARE_DIR="$(dirname "${TRIM_APPDEST}")/shares/canonrevive"
+fi
+mkdir -p "${SHARE_DIR}/in" "${SHARE_DIR}/out"
+chown -R "${TRIM_RUN_USERNAME}":"${TRIM_GROUPNAME}" "${SHARE_DIR}" 2>/dev/null || true
+
+# 共享目录已由旧名 photos 改为 canonrevive（避免被清理精灵误判为卸载残余）。
+# 把旧 photos 目录里待处理/已处理的照片迁移到新目录，避免用户照片“丢失”。
+OLD_SHARE_DIR="/var/apps/${TRIM_APPNAME}/shares/photos"
+if [ -z "${TRIM_APPNAME}" ]; then
+    OLD_SHARE_DIR="$(dirname "${TRIM_APPDEST}")/shares/photos"
+fi
+if [ -d "${OLD_SHARE_DIR}" ]; then
+    for sub in in out; do
+        if [ -d "${OLD_SHARE_DIR}/${sub}" ]; then
+            mkdir -p "${SHARE_DIR}/${sub}"
+            # -n 不覆盖已存在文件，移动失败的保留在旧目录
+            cp -an "${OLD_SHARE_DIR}/${sub}/." "${SHARE_DIR}/${sub}/" 2>/dev/null || true
+        fi
+    done
+    chown -R "${TRIM_RUN_USERNAME}":"${TRIM_GROUPNAME}" "${SHARE_DIR}" 2>/dev/null || true
+    # 旧 photos 共享根目录由系统管理，应用无权删除；迁移完成后它成为空目录，
+    # 用户可在清理精灵中作为残余安全清理（不影响新目录与照片）。
+fi
+
+exit 0

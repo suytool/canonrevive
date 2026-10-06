@@ -1,0 +1,19 @@
+{
+    ".url": {
+        "canonrevive.Application": {
+            "title": "Canon助手",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "port": "18080",
+            "url": "/",
+            "allUsers": true,
+            "control": {
+                "accessPerm": "editable",
+                "fullUrlPerm": "editable",
+                "portPerm": "readonly",
+                "pathPerm": "readonly"
+            }
+        }
+    }
+}

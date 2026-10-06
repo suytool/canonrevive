@@ -1,0 +1,16 @@
+appname=canonrevive
+version=0.1.7
+display_name=Canon助手
+desc=把相机屏幕上的惊艳还原到导出的照片上。一键提亮、增对比、增饱和，内置相机屏显还原、梦幻柔焦、经典黑白等十款滤镜，支持单张精修与共享目录批量处理。原生应用，照片仅在本地 NAS 处理。
+arch=x86_64
+source=thirdparty
+maintainer=suytool
+distributor=suytool
+service_port=18080
+checkport=true
+os_min_version=0.8.29
+desktop_appname=canonrevive.Application
+desktop_uidir=ui
+desktop_applaunchname=
+micro_app=true
+ctl_stop=true

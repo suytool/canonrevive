@@ -1,0 +1,14 @@
+# 构建产物（Go 编译的二进制）
+fpk/app/canonrevive
+
+# fpk 安装包（发布在 GitHub Releases，不入库）
+*.fpk
+
+# 安装包 zip（发布在 GitHub Releases，不入库）
+*.zip
+
+# 本地测试目录
+.test/
+
+# 系统文件
+.DS_Store

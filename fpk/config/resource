@@ -1,0 +1,22 @@
+{
+    "data-share":
+    {
+        "shares":
+        [
+            {
+                "name": "canonrevive",
+                "permission":
+                {
+                    "rw":
+                    [
+                        "canonrevive"
+                    ]
+                }
+            }
+        ]
+    },
+    "api-scope": [
+        "trim.file.sharedAccess",
+        "trim.file.path"
+    ]
+}

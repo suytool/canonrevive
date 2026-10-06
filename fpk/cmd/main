@@ -1,0 +1,392 @@
+#!/bin/bash
+#
+# Canon助手 fnOS 生命周期入口：start | stop | status
+#
+# 进程监督要点（解决“异常退出后端口被占用、无法启动”）：
+#  - 同时记录 PID 与进程启动时间(/proc/<pid>/stat 第22列)，防止 PID 复用误判；
+#  - 通过 /proc/<pid>/exe 校验进程归属，只操作本应用自己的进程，绝不误杀其他程序；
+#  - 启动前做“孤儿对账”：回收残留的本应用实例，再精确判断端口是否被其他程序占用；
+#  - 启动后用 HTTP /api/ready 就绪探测，而不是只看进程是否存活；
+#  - start 加文件锁，避免系统/用户并发拉起导致双实例互抢端口。
+
+LOG_DIR="${TRIM_PKGVAR}/logs"
+LOG_FILE="${LOG_DIR}/app.log"
+RUN_DIR="${TRIM_PKGVAR}/run"
+PID_FILE="${RUN_DIR}/canonrevive.pid"
+START_FILE="${RUN_DIR}/canonrevive.starttime"
+LOCK_FILE="${RUN_DIR}/.start.lock"
+
+APP_BIN="${TRIM_APPDEST}/canonrevive"
+# fnOS 共享目录位于应用根目录 /var/apps/[appname]/shares/ 下（由 resource 声明创建）
+# 不能用 dirname(TRIM_APPDEST) 推导——那会落到系统无权写入的 /volX/@appcenter/
+SHARE_DIR="/var/apps/${TRIM_APPNAME}/shares/canonrevive"
+if [ -z "${TRIM_APPNAME}" ]; then
+    SHARE_DIR="$(dirname "${TRIM_APPDEST}")/shares/canonrevive"
+fi
+PORT="${TRIM_SERVICE_PORT:-18080}"
+
+log_msg() {
+    mkdir -p "${LOG_DIR}" 2>/dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+# 把真实原因写入系统错误弹窗（fnOS 会展示给用户）
+fail_with() {
+    log_msg "FAIL: $1"
+    if [ -n "${TRIM_TEMP_LOGFILE}" ]; then
+        echo "$1" > "${TRIM_TEMP_LOGFILE}" 2>/dev/null
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# 进程身份与端口检测（纯 /proc，不依赖 ss/netstat/pgrep）
+# ---------------------------------------------------------------------------
+
+proc_alive() {
+    local pid=$1
+    case "${pid}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "${pid}" 2>/dev/null
+}
+
+# 返回进程可执行文件真实路径（升级覆盖后旧进程会带 " (deleted)" 后缀，去掉）
+proc_exe() {
+    local pid=$1
+    readlink "/proc/${pid}/exe" 2>/dev/null | sed 's/ (deleted)$//'
+}
+
+# 判断 pid 是否为本应用实例（按安装目录 + 二进制名，兼容升级后 (deleted) 路径）
+is_our_pid() {
+    local pid=$1 exe base
+    exe="$(proc_exe "${pid}")" || return 1
+    [ -n "${exe}" ] || return 1
+    base="$(basename "${exe}")"
+    [ "${base}" = "canonrevive" ] || return 1
+    case "${exe}" in
+        "$(dirname "${APP_BIN}")"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+proc_starttime() {
+    awk '{print $22}' "/proc/$1/stat" 2>/dev/null
+}
+
+# 枚举当前所有本应用进程（含孤儿）
+all_our_pids() {
+    local d pid
+    for d in /proc/[0-9]*; do
+        pid="${d#/proc/}"
+        if is_our_pid "${pid}"; then
+            echo "${pid}"
+        fi
+    done
+}
+
+read_pid() {
+    if [ -f "${PID_FILE}" ]; then
+        sed -n '1{s/[[:space:]]//g;p;}' "${PID_FILE}"
+    fi
+}
+
+remove_pid_record() {
+    rm -f "${PID_FILE}" "${START_FILE}" 2>/dev/null
+}
+
+# pid 存活、归属本应用、且启动时间与记录一致（受管实例）
+is_managed_pid() {
+    local pid=$1 recorded actual
+    proc_alive "${pid}" || return 1
+    is_our_pid "${pid}" || return 1
+    [ -f "${START_FILE}" ] || return 1
+    recorded="$(tr -d '[:space:]' < "${START_FILE}")"
+    actual="$(proc_starttime "${pid}")"
+    [ -n "${recorded}" ] && [ "${recorded}" = "${actual}" ]
+}
+
+write_pid_record() {
+    local pid=$1 st
+    st="$(proc_starttime "${pid}")" || return 1
+    mkdir -p "${RUN_DIR}" 2>/dev/null
+    printf '%s\n' "${pid}" > "${PID_FILE}"
+    printf '%s\n' "${st}" > "${START_FILE}"
+}
+
+# 分级停止：SIGTERM 等待，超时 SIGKILL
+terminate_pid() {
+    local pid=$1 i
+    proc_alive "${pid}" || return 0
+    log_msg "发送 SIGTERM 给 PID ${pid}"
+    kill -TERM "${pid}" 2>/dev/null || true
+    for i in $(seq 1 12); do
+        proc_alive "${pid}" || { log_msg "PID ${pid} 已退出"; return 0; }
+        sleep 1
+    done
+    log_msg "PID ${pid} 未在12秒内退出，发送 SIGKILL"
+    kill -KILL "${pid}" 2>/dev/null || true
+    for i in $(seq 1 10); do
+        proc_alive "${pid}" || return 0
+        sleep 0.2
+    done
+}
+
+# 返回监听 PORT 的 socket inode 列表（/proc/net/tcp{,6}，state 0A=LISTEN）
+port_listen_inodes() {
+    local hex
+    hex="$(printf '%04X' "${PORT}")"
+    { cat /proc/net/tcp 2>/dev/null; cat /proc/net/tcp6 2>/dev/null; } |
+        awk -v hex="${hex}" 'NR>1 { n=split($2,a,":"); if (a[n]==hex && $4=="0A") print $10 }' |
+        sort -u
+}
+
+port_in_use() {
+    [ -n "$(port_listen_inodes)" ]
+}
+
+# 找到持有指定 socket inode 的进程 pid
+pid_for_inode() {
+    local inode=$1 d pid fd link
+    for d in /proc/[0-9]*; do
+        pid="${d#/proc/}"
+        for fd in "${d}"/fd/*; do
+            link="$(readlink "${fd}" 2>/dev/null)" || continue
+            if [ "${link}" = "socket:[${inode}]" ]; then
+                echo "${pid}"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+wait_port_free() {
+    local tries=${1:-12} i
+    for i in $(seq 1 "${tries}"); do
+        port_in_use || return 0
+        sleep 0.5
+    done
+    port_in_use && return 1 || return 0
+}
+
+# HTTP 就绪探测：优先 curl，其次 wget，都没有则用 bash /dev/tcp 兜底
+ready_ok() {
+    local url="http://127.0.0.1:${PORT}/api/ready" code
+    if command -v curl >/dev/null 2>&1; then
+        code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 3 "${url}" 2>/dev/null)"
+        [ "${code}" = "200" ] && return 0
+        return 1
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        code="$(wget -q -S -T 3 -O /dev/null "${url}" 2>&1 | awk '/HTTP\/[0-9.]/{c=$2} END{print c}')"
+        [ "${code}" = "200" ] && return 0
+        return 1
+    fi
+    (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
+    return 1
+}
+
+# 停止所有本应用实例（受管进程 + 孤儿），stop/启动对账共用
+stop_all_ours() {
+    local pid pids
+    pid="$(read_pid)"
+    if [ -n "${pid}" ] && proc_alive "${pid}" && is_our_pid "${pid}"; then
+        terminate_pid "${pid}"
+    fi
+    # 兜底：清理任何残留的本应用进程
+    for p in $(all_our_pids); do
+        terminate_pid "${p}"
+    done
+    remove_pid_record
+    wait_port_free 10 || true
+}
+
+# ---------------------------------------------------------------------------
+# start
+# ---------------------------------------------------------------------------
+start_process() {
+    mkdir -p "${RUN_DIR}" 2>/dev/null
+
+    # 并发保护：避免系统自动重启与手动启动叠加，产生双实例互抢端口
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"${LOCK_FILE}"
+        if ! flock -w 15 9; then
+            fail_with "另一个启动操作正在进行，请稍后重试"
+            return 1
+        fi
+    fi
+
+    log_msg "===== start ====="
+    log_msg "TRIM_APPDEST=${TRIM_APPDEST} TRIM_PKGVAR=${TRIM_PKGVAR} PORT=${PORT} USER=${TRIM_RUN_USERNAME}"
+
+    if [ -z "${TRIM_PKGVAR}" ]; then
+        fail_with "系统未提供数据目录(TRIM_PKGVAR)，无法启动"
+        return 1
+    fi
+    mkdir -p "${TRIM_PKGVAR}" "${RUN_DIR}" "${LOG_DIR}" 2>/dev/null || {
+        fail_with "数据目录不可写: ${TRIM_PKGVAR}"
+        return 1
+    }
+    if [ ! -x "${APP_BIN}" ]; then
+        chmod +x "${APP_BIN}" 2>/dev/null || true
+    fi
+    if [ ! -x "${APP_BIN}" ]; then
+        fail_with "应用程序缺失或不可执行: ${APP_BIN}"
+        return 1
+    fi
+
+    # 批量共享目录（共享目录由系统创建授权，这里只补子目录）
+    if ! mkdir -p "${SHARE_DIR}/in" "${SHARE_DIR}/out" 2>/dev/null; then
+        log_msg "WARN: 无法创建批量目录 ${SHARE_DIR}/in（批量功能可能降级，单张处理不受影响）"
+    fi
+    if [ -n "${TRIM_RUN_USERNAME}" ]; then
+        chown -R "${TRIM_RUN_USERNAME}":"${TRIM_GROUPNAME}" "${SHARE_DIR}" 2>/dev/null || true
+    fi
+
+    # --- 启动对账：处理 pidfile 记录的实例 ---
+    local pid
+    pid="$(read_pid)"
+    if [ -n "${pid}" ] && proc_alive "${pid}"; then
+        if is_our_pid "${pid}"; then
+            if ready_ok; then
+                log_msg "应用已在运行且就绪，PID ${pid}，幂等返回"
+                write_pid_record "${pid}" 2>/dev/null || true
+                return 0
+            fi
+            log_msg "已有本应用进程 PID ${pid} 但服务未就绪，先回收再重启"
+            terminate_pid "${pid}"
+        else
+            # PID 已被其他程序复用，绝不能动它
+            log_msg "WARN: PID ${pid} 非本应用进程（PID 复用），仅清理陈旧记录"
+        fi
+        remove_pid_record
+    else
+        remove_pid_record
+    fi
+
+    # --- 回收所有本应用孤儿进程（崩溃/升级后 pidfile 丢失但仍在监听的残留）---
+    local orphans
+    orphans="$(all_our_pids)"
+    if [ -n "${orphans}" ]; then
+        log_msg "发现本应用残留进程: $(echo "${orphans}" | tr '\n' ' ')，进行回收"
+        for p in ${orphans}; do
+            terminate_pid "${p}"
+        done
+        wait_port_free 12 || true
+    fi
+
+    # --- 端口占用判定：若仍被占用，必须确认是不是本应用；不是则拒绝启动 ---
+    if port_in_use; then
+        local ino owner
+        for ino in $(port_listen_inodes); do
+            owner="$(pid_for_inode "${ino}")"
+            [ -n "${owner}" ] && break
+        done
+        if [ -n "${owner}" ] && is_our_pid "${owner}"; then
+            log_msg "端口 ${PORT} 仍由本应用 PID ${owner} 占用，强制回收"
+            terminate_pid "${owner}"
+            wait_port_free 12 || true
+        fi
+    fi
+    if port_in_use; then
+        local owner2 owner_exe="" ino2
+        for ino2 in $(port_listen_inodes); do
+            owner2="$(pid_for_inode "${ino2}")"
+            [ -n "${owner2}" ] && { owner_exe="$(proc_exe "${owner2}")"; break; }
+        done
+        local detail=""
+        if [ -n "${owner2}" ]; then
+            detail="（被进程 ${owner2}: ${owner_exe:-未知程序} 占用）"
+        fi
+        fail_with "端口 ${PORT} 被其他程序占用${detail}，请在应用设置中更换端口，或停止占用该端口的程序后重试"
+        return 1
+    fi
+
+    # --- 正式启动（直接 nohup 二进制，$! 即应用 PID，无多余 exec 层）---
+    export PORT
+    export APP_DATA="${TRIM_PKGVAR}"
+    export APP_IN="${SHARE_DIR}/in"
+    export APP_OUT="${SHARE_DIR}/out"
+    log_msg "启动应用: ${APP_BIN} (PORT=${PORT})"
+    # 9>&-：关键！子进程不得继承 flock 的锁 fd，否则锁会被长期运行的服务持有，
+    # 导致下一次 start 永远等不到锁。
+    nohup "${APP_BIN}" >> "${LOG_FILE}" 2>&1 9>&- &
+    local newpid=$!
+    if ! write_pid_record "${newpid}"; then
+        kill -KILL "${newpid}" 2>/dev/null || true
+        remove_pid_record
+        fail_with "无法记录进程身份，启动中止"
+        return 1
+    fi
+    # 启动决策已完成，立即释放启动锁，后续就绪等待不再阻塞其他 start 请求
+    exec 9>&- 2>/dev/null || true
+
+    # --- 就绪探测（最多约 15 秒）---
+    local i
+    for i in $(seq 1 15); do
+        if ! proc_alive "${newpid}"; then
+            remove_pid_record
+            log_msg "进程启动后立即退出，最近日志:"
+            tail -25 "${LOG_FILE}" >> "${LOG_FILE}" 2>/dev/null
+            local last_err
+            last_err="$(tail -40 "${LOG_FILE}" | grep -iE 'bind|address already|listen|denied|permission|panic|fatal|占用|拒绝|no such file|cannot|unable' | grep -viE 'FAIL:|^[0-9]{4}-[0-9]{2}-[0-9]{2}' | tail -1)"
+            [ -z "${last_err}" ] && last_err="进程启动后退出，请查看应用日志 ${LOG_FILE}"
+            fail_with "应用启动失败：${last_err}"
+            return 1
+        fi
+        if ready_ok; then
+            log_msg "应用启动成功并就绪，PID ${newpid}"
+            return 0
+        fi
+        sleep 1
+    done
+
+    log_msg "就绪探测超时，回收本次启动进程 PID ${newpid}"
+    terminate_pid "${newpid}"
+    remove_pid_record
+    fail_with "应用在限定时间内未就绪，可能是端口 ${PORT} 异常或启动过慢，请查看日志后重试"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# stop
+# ---------------------------------------------------------------------------
+stop_process() {
+    mkdir -p "${RUN_DIR}" 2>/dev/null
+    log_msg "===== stop ====="
+    stop_all_ours
+    log_msg "已停止"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# status：进程存活且归属本应用即视为运行中（exit 0），否则 exit 3
+# ---------------------------------------------------------------------------
+status_process() {
+    local pid
+    pid="$(read_pid)"
+    if [ -n "${pid}" ] && proc_alive "${pid}" && is_our_pid "${pid}"; then
+        # 记录与实际启动时间不一致时（如被手动拉起），重建记录以便后续 stop
+        if [ ! -f "${START_FILE}" ] || [ "$(tr -d '[:space:]' < "${START_FILE}")" != "$(proc_starttime "${pid}")" ]; then
+            write_pid_record "${pid}" 2>/dev/null || true
+        fi
+        exit 0
+    fi
+    # pidfile 失效但确实有本应用进程在跑（孤儿存活），重建关联并视为运行中
+    local any
+    any="$(all_our_pids | head -1)"
+    if [ -n "${any}" ]; then
+        write_pid_record "${any}" 2>/dev/null || true
+        exit 0
+    fi
+    remove_pid_record
+    exit 3
+}
+
+case $1 in
+    start)  start_process ;;
+    stop)   stop_process ;;
+    status) status_process ;;
+    *)      exit 1 ;;
+esac

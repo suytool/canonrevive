@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canon助手 · 相机屏显还原</title>
+<link rel="stylesheet" href="style.css?v=0.1.7">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 8h2.5L8 5.5h8L17.5 8H20a1.5 1.5 0 0 1 1.5 1.5V19A1.5 1.5 0 0 1 20 20.5H4A1.5 1.5 0 0 1 2.5 19V9.5A1.5 1.5 0 0 1 4 8z"/>
+        <circle cx="12" cy="14" r="3.8"/>
+      </svg>
+    </div>
+    <div>
+      <h1>Canon助手 <span class="sub">相机屏显还原</span></h1>
+      <p class="tagline">把佳能相机屏幕上的惊艳，还原到导出的照片上</p>
+    </div>
+  </div>
+  <div class="status" id="status">等待上传照片 <span class="ver" id="versionTag"></span></div>
+</header>
+
+<main>
+  <!-- 上传区 -->
+  <section class="upload-zone" id="uploadZone">
+    <div class="upload-inner">
+      <div class="upload-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 8h2.5L8 5.5h8L17.5 8H20a1.5 1.5 0 0 1 1.5 1.5V19A1.5 1.5 0 0 1 20 20.5H4A1.5 1.5 0 0 1 2.5 19V9.5A1.5 1.5 0 0 1 4 8z"/>
+          <circle cx="12" cy="14" r="3.8"/>
+          <path d="M12 12v4M10 14h4"/>
+        </svg>
+      </div>
+      <p class="upload-title">拖入或点击选择照片</p>
+      <p class="upload-hint">支持 JPG / JPEG / PNG · 自动纠正 EXIF 方向 · 单张最大 64MB</p>
+      <button class="btn btn-primary" id="pickBtn">选择照片</button>
+      <input type="file" id="fileInput" accept="image/jpeg,image/png" hidden>
+    </div>
+  </section>
+
+  <!-- 编辑区 -->
+  <section class="editor" id="editor" hidden>
+    <div class="editor-left">
+      <div class="compare-stage">
+        <div class="compare-grid">
+          <div class="compare-cell">
+            <canvas id="origCanvas"></canvas>
+            <div class="compare-label label-left">原图</div>
+          </div>
+          <div class="compare-cell">
+            <canvas id="previewCanvas"></canvas>
+            <div class="compare-label label-right">还原效果</div>
+          </div>
+        </div>
+      </div>
+      <div class="file-meta" id="fileMeta"></div>
+    </div>
+
+    <div class="editor-right">
+      <div class="panel">
+        <h2>风格滤镜</h2>
+        <div class="preset-grid" id="presetGrid"></div>
+      </div>
+
+      <div class="panel">
+        <h2>精细调节 <button class="btn btn-ghost" id="resetBtn">重置</button></h2>
+        <div class="sliders" id="sliders"></div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary btn-lg" id="downloadBtn">⬇ 下载还原后的照片</button>
+        <span class="dl-note">服务端按原图分辨率渲染，与预览效果一致</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 批量处理：始终可见，无需先上传单张 -->
+  <section class="batch" id="batchSection">
+    <div class="batch-head">
+      <h2>批量处理</h2>
+      <span class="batch-tip">无需上传，直接处理共享目录里的全部照片</span>
+    </div>
+    <p>把需要处理的照片复制到 NAS 共享目录的 <code id="batchInPath">share/in</code>，处理结果输出到 <code id="batchOutPath">share/out</code>。适用于一次处理整批导出的照片。</p>
+    <div class="batch-preset">
+      <label for="batchPreset">批量效果</label>
+      <select id="batchPreset"></select>
+    </div>
+    <div class="batch-actions">
+      <button class="btn btn-primary" id="batchBtn">开始批量处理</button>
+      <span class="dl-note" id="batchResult"></span>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>Canon助手 · 原生 fnOS 应用 · 照片仅在本地 NAS 处理，不会上传到任何服务器</p>
+  <button class="btn btn-support" id="supportBtn">☕ 支持作者</button>
+</footer>
+
+<!-- 支持作者弹窗 -->
+<div class="modal-mask" id="supportModal" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>支持作者</h2>
+      <button class="modal-close" id="supportClose" aria-label="关闭">✕</button>
+    </div>
+    <p class="modal-desc">如果你觉得 Canon助手 好用，欢迎扫码支持一下，感谢每一份鼓励～</p>
+    <div class="qr-grid">
+      <div class="qr-cell">
+        <img src="qrcode_wechat.png" alt="微信收款码">
+        <span>微信</span>
+      </div>
+      <div class="qr-cell">
+        <img src="qrcode_alipay.png" alt="支付宝收款码">
+        <span>支付宝</span>
+      </div>
+    </div>
+    <p class="modal-tip">长按二维码图片可保存</p>
+  </div>
+</div>
+
+<script src="app.js?v=0.1.7"></script>
+</body>
+</html>

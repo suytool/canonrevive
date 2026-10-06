@@ -1,0 +1,15 @@
+#!/bin/bash
+
+### This script is called after the user installs the application.
+### Create the batch processing sub-directories inside the photo share.
+
+# 共享目录由系统按 resource 声明创建于应用根目录下
+SHARE_DIR="/var/apps/${TRIM_APPNAME}/shares/canonrevive"
+if [ -z "${TRIM_APPNAME}" ]; then
+    SHARE_DIR="$(dirname "${TRIM_APPDEST}")/shares/canonrevive"
+fi
+mkdir -p "${SHARE_DIR}/in" "${SHARE_DIR}/out"
+chown -R "${TRIM_RUN_USERNAME}":"${TRIM_GROUPNAME}" "${SHARE_DIR}" 2>/dev/null || true
+chmod 755 "${SHARE_DIR}" "${SHARE_DIR}/in" "${SHARE_DIR}/out" 2>/dev/null || true
+
+exit 0
