@@ -109,6 +109,13 @@ main { max-width: 1320px; margin: 0 auto; padding: 24px 28px 60px; }
   box-shadow: 0 4px 12px rgba(232, 134, 45, 0.3);
 }
 .btn-primary:hover { filter: brightness(1.06); color: #fff; box-shadow: 0 6px 16px rgba(232, 134, 45, 0.4); }
+.btn-stop {
+  background: #fbecec;
+  border-color: #f3c2c2;
+  color: #d05a55;
+  font-weight: 600;
+}
+.btn-stop:hover { background: #f8dcdc; color: #c04944; }
 .btn-lg { padding: 12px 26px; font-size: 15px; border-radius: 12px; }
 .btn-ghost { float: right; padding: 4px 12px; font-size: 12px; box-shadow: none; }
 
