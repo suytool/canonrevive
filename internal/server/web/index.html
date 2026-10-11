@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Canon助手 · 相机屏显还原</title>
-<link rel="stylesheet" href="style.css?v=0.1.7">
+<link rel="stylesheet" href="style.css?v=0.1.8">
 </head>
 <body>
 <header class="topbar">
@@ -88,6 +88,10 @@
       <label for="batchPreset">批量效果</label>
       <select id="batchPreset"></select>
     </div>
+    <div class="batch-progress" id="batchProgress" hidden>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-text" id="progressText">准备中…</div>
+    </div>
     <div class="batch-actions">
       <button class="btn btn-primary" id="batchBtn">开始批量处理</button>
       <span class="dl-note" id="batchResult"></span>
@@ -122,6 +126,6 @@
   </div>
 </div>
 
-<script src="app.js?v=0.1.7"></script>
+<script src="app.js?v=0.1.8"></script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 /* CanonRevive 前端：实时预览（Canvas，与服务端 Go 算法一致） + 上传/下载/批量 */
 'use strict';
 
-const APP_VERSION = '0.1.7';
+const APP_VERSION = '0.1.8';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -359,10 +359,21 @@ function outFileName() {
 // ---------------------------------------------------------------------------
 // 批量
 // ---------------------------------------------------------------------------
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 async function batch() {
   const btn = $('#batchBtn');
+  const progress = $('#batchProgress');
+  const fill = $('#progressFill');
+  const ptext = $('#progressText');
   btn.disabled = true;
-  $('#batchResult').textContent = '正在处理…';
+  $('#batchResult').textContent = '';
+  progress.hidden = false;
+  fill.style.width = '0%';
+  ptext.textContent = '准备中…';
   try {
     // 批量效果以下拉框选择为准；“当前编辑参数”使用上传照片后的微调结果
     const sel = $('#batchPreset');
@@ -379,21 +390,82 @@ async function batch() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ params }),
     });
-    const txt = await res.text();
-    let r;
-    try { r = JSON.parse(txt); } catch { throw new Error(txt || ('HTTP ' + res.status)); }
-    if (!res.ok) throw new Error(r.error || ('HTTP ' + res.status));
-    const ok = (r.processed || []).length;
-    const skip = (r.skipped || []).length;
-    let msg = `完成：成功 ${ok} 张，跳过 ${skip} 张`;
-    if (skip > 0) msg += '（' + r.skipped.join('、') + '）';
-    if (ok === 0 && skip === 0) msg = '输入目录中没有可处理的照片，请把照片放入 in 目录';
-    if (r.warning) msg += '。提示：' + r.warning;
-    // 降级后实际目录可能变化，同步更新页面上的路径提示
-    if (r.inDir) $('#batchInPath').textContent = r.inDir;
-    if (r.outDir) $('#batchOutPath').textContent = r.outDir;
-    $('#batchResult').textContent = msg;
+
+    // 出错（参数错误 / 目录初始化失败）时后端在进入 SSE 前返回 JSON，这里兼容
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || !ctype.includes('text/event-stream')) {
+      const txt = await res.text();
+      let errMsg = txt;
+      try { errMsg = JSON.parse(txt).error || txt; } catch { /* 用原文 */ }
+      throw new Error(errMsg || ('HTTP ' + res.status));
+    }
+
+    // 逐条读取 SSE 流，实时更新进度条
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let finalResult = null;
+    const handleEvent = (raw) => {
+      let evt = 'message';
+      const dataLines = [];
+      for (const line of raw.split('\n')) {
+        if (line.startsWith('event:')) evt = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      }
+      if (!dataLines.length) return;
+      let data;
+      try { data = JSON.parse(dataLines.join('\n')); } catch { return; }
+
+      if (evt === 'start') {
+        if (data.inDir) $('#batchInPath').textContent = data.inDir;
+        if (data.outDir) $('#batchOutPath').textContent = data.outDir;
+        if (!data.total) {
+          fill.style.width = '100%';
+          ptext.textContent = '输入目录中没有可处理的照片';
+        }
+      } else if (evt === 'progress') {
+        const { done, total, current, ok, skip } = data;
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        fill.style.width = pct + '%';
+        ptext.innerHTML =
+          `正在处理 <span class="pct">${pct}%</span>（${done}/${total}）· 成功 ${ok} 跳过 ${skip}` +
+          `<br><span class="cur">${escapeHtml(current)}</span>`;
+      } else if (evt === 'done') {
+        finalResult = data;
+      } else if (evt === 'cancel') {
+        ptext.textContent = `已取消：处理到第 ${data.done}/${data.total} 张`;
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        handleEvent(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+      }
+    }
+
+    // 流结束，回显最终结果
+    if (finalResult) {
+      const ok = (finalResult.processed || []).length;
+      const skip = (finalResult.skipped || []).length;
+      let msg = `完成：成功 ${ok} 张，跳过 ${skip} 张`;
+      if (skip > 0) msg += '（' + finalResult.skipped.join('、') + '）';
+      if (ok === 0 && skip === 0) msg = '输入目录中没有可处理的照片，请把照片放入 in 目录';
+      if (finalResult.warning) msg += '。提示：' + finalResult.warning;
+      if (finalResult.inDir) $('#batchInPath').textContent = finalResult.inDir;
+      if (finalResult.outDir) $('#batchOutPath').textContent = finalResult.outDir;
+      if (ok > 0 || skip > 0) {
+        fill.style.width = '100%';
+        ptext.innerHTML = '<span class="pct">100%</span> 处理完成';
+      }
+      $('#batchResult').textContent = msg;
+    }
   } catch (e) {
+    progress.hidden = true;
     $('#batchResult').textContent = '批量处理失败：' + e.message;
   } finally {
     btn.disabled = false;

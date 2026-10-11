@@ -372,52 +372,94 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		warn = "共享目录不可用（可能被清理工具删除），当前使用应用数据目录 " + s.inDir + "，批量功能正常；建议重启应用以恢复共享目录"
 	}
 
+	// 先收集待处理图片，得到准确总数，再进入流式进度
 	entries, _ := os.ReadDir(s.inDir)
-	processed := []string{}
-	skipped := []string{}
+	jobs := []string{}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		name := e.Name()
-		if !isImageExt(name) {
-			continue
+		if isImageExt(e.Name()) {
+			jobs = append(jobs, e.Name())
 		}
+	}
+
+	// SSE 响应头：必须在写出任何 body 之前设置（前面的错误都已返回 JSON）。
+	// X-Accel-Buffering:no 是关键——让 fnOS 内置 Nginx 不要缓冲，进度实时到达前端。
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	total := len(jobs)
+	sseWrite(w, "start", map[string]any{"total": total, "inDir": s.inDir, "outDir": s.outDir})
+
+	processed := []string{}
+	skipped := []string{}
+	for idx, name := range jobs {
+		// 客户端关闭页面/断开时提前停止，避免无谓占用 CPU
+		select {
+		case <-r.Context().Done():
+			sseWrite(w, "cancel", map[string]any{"done": idx, "total": total})
+			return
+		default:
+		}
+
 		srcPath := filepath.Join(s.inDir, name)
 		raw, err := os.ReadFile(srcPath)
 		if err != nil {
 			skipped = append(skipped, name+"（读取失败）")
-			continue
-		}
-		exifSeg := fixExifOrientation(extractExifAPP1(raw))
-		orient := orientationOf(bytes.NewReader(raw))
-		var img image.Image
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					log.Printf("批量处理 %s 异常已跳过: %v", name, rec)
-					img = nil
+		} else {
+			exifSeg := fixExifOrientation(extractExifAPP1(raw))
+			orient := orientationOf(bytes.NewReader(raw))
+			var img image.Image
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						log.Printf("批量处理 %s 异常已跳过: %v", name, rec)
+						img = nil
+					}
+				}()
+				decoded, _, derr := image.Decode(bytes.NewReader(raw))
+				if derr != nil {
+					skipped = append(skipped, name+"（解码失败）")
+					return
 				}
+				img = applyOrientationInt(decoded, orient)
+				out := imageproc.Apply(img, req.Params)
+				outPath := filepath.Join(s.outDir, baseOutName(name))
+				if err := saveJPEGWithExif(outPath, out, exifSeg); err != nil {
+					skipped = append(skipped, name+"（写入失败）")
+					return
+				}
+				processed = append(processed, name)
 			}()
-			decoded, _, derr := image.Decode(bytes.NewReader(raw))
-			if derr != nil {
-				skipped = append(skipped, name+"（解码失败）")
-				return
+			if img == nil && !containsSkip(skipped, name) {
+				skipped = append(skipped, name+"（处理失败）")
 			}
-			img = applyOrientationInt(decoded, orient)
-			out := imageproc.Apply(img, req.Params)
-			outPath := filepath.Join(s.outDir, baseOutName(name))
-			if err := saveJPEGWithExif(outPath, out, exifSeg); err != nil {
-				skipped = append(skipped, name+"（写入失败）")
-				return
-			}
-			processed = append(processed, name)
-		}()
-		if img == nil && !containsSkip(skipped, name) {
-			skipped = append(skipped, name+"（处理失败）")
 		}
+
+		sseWrite(w, "progress", map[string]any{
+			"done": idx + 1, "total": total, "current": name,
+			"ok": len(processed), "skip": len(skipped),
+		})
 	}
-	writeJSON(w, map[string]any{"processed": processed, "skipped": skipped, "inDir": s.inDir, "outDir": s.outDir, "warning": warn})
+
+	sseWrite(w, "done", map[string]any{
+		"processed": processed, "skipped": skipped,
+		"inDir": s.inDir, "outDir": s.outDir, "warning": warn,
+	})
+}
+
+// sseWrite 写出一条 SSE 事件并立即 flush，保证进度实时推送到浏览器。
+func sseWrite(w http.ResponseWriter, event string, data any) {
+	b, _ := json.Marshal(data)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func containsSkip(skipped []string, name string) bool {
